@@ -151,5 +151,3 @@ async def purge(i: discord.Interaction, amount: app_commands.Range[int,1,100]):
     await i.response.defer(ephemeral=True)
     deleted = await i.channel.purge(limit=amount)
     await i.followup.send(f"Deleted {len(deleted)} messages.", ephemeral=True)
-
-bot.run(TOKEN)
