@@ -12,7 +12,10 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OWNER_ID = int(os.getenv("BOT_OWNER_ID", "1561009085405466714"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+ai = AsyncOpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+)
 
 ADMIN_FILE = Path("cortex_admins.json")
 LOG_FILE = Path("cortex_logs.json")
