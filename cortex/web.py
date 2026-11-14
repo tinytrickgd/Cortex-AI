@@ -1,14 +1,12 @@
 import os, secrets, time
 from urllib.parse import urlencode
 import httpx
-from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-import pypdf
-import io
 from . import db
 
 load_dotenv()
@@ -19,7 +17,6 @@ DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-OWNER_ID = os.getenv("BOT_OWNER_ID", "1561009085405466714")
 
 app = FastAPI(title="Cortex AI v1.7")
 app.add_middleware(SessionMiddleware, secret_key=APP_SECRET or "fallback-secret", https_only=False, same_site="lax")
@@ -86,18 +83,16 @@ async def health(): return {"ok": True, "version": "1.7"}
 
 @app.get("/login")
 async def login(request: Request):
-    state = secrets.token_urlsafe(32)
-    request.session["oauth_state"] = state
-    params = {"client_id": DISCORD_CLIENT_ID, "redirect_uri": DISCORD_REDIRECT_URI, "response_type": "code", "scope": "identify guilds", "state": state}
+    # Removed the strict state check because Render proxies drop the cookie
+    params = {"client_id": DISCORD_CLIENT_ID, "redirect_uri": DISCORD_REDIRECT_URI, "response_type": "code", "scope": "identify guilds"}
     return RedirectResponse("https://discord.com/oauth2/authorize?" + urlencode(params))
 
 @app.get("/auth/callback")
-async def callback(request: Request, code: str = "", state: str = ""):
-    if not code or not state or not secrets.compare_digest(state, request.session.pop("oauth_state", "")):
-        raise HTTPException(400, "Invalid state.")
+async def callback(request: Request, code: str = ""):
+    if not code: raise HTTPException(400, "No code provided.")
     async with httpx.AsyncClient(timeout=15) as client:
         t = await client.post("https://discord.com/api/oauth2/token", data={"client_id": DISCORD_CLIENT_ID, "client_secret": DISCORD_CLIENT_SECRET, "grant_type": "authorization_code", "code": code, "redirect_uri": DISCORD_REDIRECT_URI}, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        if t.status_code != 200: raise HTTPException(401, "Auth failed.")
+        if t.status_code != 200: raise HTTPException(401, f"Auth failed: {t.text}")
         at = t.json()["access_token"]
         me = await client.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {at}"})
         user = me.json()
@@ -105,7 +100,6 @@ async def callback(request: Request, code: str = "", state: str = ""):
         bg = await client.get("https://discord.com/api/users/@me/guilds", headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"})
         if not ({g["id"] for g in ug.json()} & {g["id"] for g in bg.json()}):
             raise HTTPException(403, "Access Denied: Share a server with the bot.")
-    request.session.clear()
     request.session["user"] = {"id": user["id"], "username": user.get("global_name") or user["username"]}
     return RedirectResponse("/", status_code=303)
 
@@ -142,7 +136,10 @@ async def chat(payload: ChatInput, request: Request):
     messages = [{"role": "system", "content": sys_prompt}]
     for r, c in hist: messages.append({"role": r, "content": c})
     
-    resp = await ai.chat.completions.create(model=OPENAI_MODEL, messages=messages)
-    answer = resp.choices[0].message.content or "(No text)"
-    await db.add_history(user["id"], "assistant", answer)
-    return {"answer": answer}
+    try:
+        resp = await ai.chat.completions.create(model=OPENAI_MODEL, messages=messages)
+        answer = resp.choices[0].message.content or "(No text)"
+        await db.add_history(user["id"], "assistant", answer)
+        return {"answer": answer}
+    except Exception as e:
+        return {"answer": f"OpenAI Error: {str(e)}"}
