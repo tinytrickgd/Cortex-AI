@@ -29,11 +29,11 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("cortex-bot")
 
 MODES = {
-    "coding": "You are an expert programming assistant. Provide clean, functional code and brief explanations.",
-    "research": "You are a research assistant. Provide factual, well-structured information and cite sources if possible.",
-    "creative": "You are a creative writing assistant. Use vivid, immersive prose and deep vocabulary.",
-    "cyber": "You are a defensive cybersecurity assistant. Help with threat modeling, hardening, and analysis. Do not assist with offensive attacks.",
-    "game": "You are a game development assistant. Help with engines, game feel, math, and system architecture."
+    "coding": "You are an expert programming assistant. Provide clean, functional code.",
+    "research": "You are a research assistant. Provide factual info.",
+    "creative": "You are a creative writing assistant.",
+    "cyber": "You are a defensive cybersecurity assistant.",
+    "game": "You are a game development assistant."
 }
 
 def get_level(user_id):
@@ -70,34 +70,38 @@ async def errors(i, error):
     if i.response.is_done(): await i.followup.send(msg, ephemeral=True)
     else: await i.response.send_message(msg, ephemeral=True)
 
+# --- Public AI Commands ---
 @bot.tree.command(name="cortex_help", description="Show Cortex AI commands")
 async def cortex_help(i: discord.Interaction):
     embed = discord.Embed(title="Cortex AI v1.7", color=discord.Color.purple())
     embed.add_field(name="/ask", value="Ask the AI a question", inline=False)
-    embed.add_field(name="/cortex_mode", value="Set your AI mode (coding, creative, etc.)", inline=False)
+    embed.add_field(name="/cortex_mode", value="Set your AI mode", inline=False)
     embed.add_field(name="/cortex_history", value="View your last 10 messages", inline=False)
-    embed.add_field(name="/cortex_clear", value="Clear your conversation history", inline=False)
+    embed.add_field(name="/cortex_clear", value="Clear your history", inline=False)
     await i.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ask", description="Ask Cortex a question")
 async def ask(i: discord.Interaction, question: str):
     await i.response.defer(ephemeral=True, thinking=True)
-    mode, custom = await db.get_user_settings(str(i.user.id))
-    sys_prompt = MODES.get(mode, "You are Cortex, a helpful AI assistant.")
-    if custom: sys_prompt += f"\nUser instructions: {custom}"
-    
-    await db.add_history(str(i.user.id), "user", question)
-    history = await db.get_history(str(i.user.id), 6)
-    
-    messages = [{"role": "system", "content": sys_prompt}]
-    for r, c in history: messages.append({"role": r, "content": c})
-    
-    r = await ai.chat.completions.create(model=MODEL, messages=messages)
-    answer = r.choices[0].message.content or "No response."
-    await db.add_history(str(i.user.id), "assistant", answer)
-    
-    for start in range(0, len(answer), 1900):
-        await i.followup.send(answer[start:start+1900], ephemeral=True)
+    try:
+        mode, custom = await db.get_user_settings(str(i.user.id))
+        sys_prompt = MODES.get(mode, "You are Cortex, a helpful AI assistant.")
+        if custom: sys_prompt += f"\nUser instructions: {custom}"
+        
+        await db.add_history(str(i.user.id), "user", question)
+        history = await db.get_history(str(i.user.id), 6)
+        
+        messages = [{"role": "system", "content": sys_prompt}]
+        for r, c in history: messages.append({"role": r, "content": c})
+        
+        r = await ai.chat.completions.create(model=MODEL, messages=messages)
+        answer = r.choices[0].message.content or "No response."
+        await db.add_history(str(i.user.id), "assistant", answer)
+        
+        for start in range(0, len(answer), 1900):
+            await i.followup.send(answer[start:start+1900], ephemeral=True)
+    except Exception as e:
+        await i.followup.send(f"AI Error: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="cortex_mode", description="Set your AI mode")
 @app_commands.choices(mode=[
@@ -119,7 +123,7 @@ async def cortex_history(i: discord.Interaction):
     out = "\n".join([f"**{r}:** {c[:100]}..." for r, c in hist])
     await i.response.send_message(out[:2000], ephemeral=True)
 
-@bot.tree.command(name="cortex_clear", description="Clear your conversation history")
+@bot.tree.command(name="cortex_clear", description="Clear your history")
 async def cortex_clear(i: discord.Interaction):
     await db.clear_history(str(i.user.id))
     await i.response.send_message("History cleared.", ephemeral=True)
@@ -129,8 +133,9 @@ async def cortex_stats(i: discord.Interaction):
     u, m = await db.get_stats()
     await i.response.send_message(f"**Cortex Stats**\nUsers: {u}\nMessages: {m}\nGuilds: {len(bot.guilds)}", ephemeral=True)
 
-# Admin Commands (v1.6 parity)
+# --- Admin Commands (Hidden from non-admins) ---
 @bot.tree.command(name="admin_grant", description="Owner: grant admin level (1=Mod, 2=Senior)")
+@app_commands.default_permissions(administrator=True)
 @app_commands.check(is_owner())
 async def admin_grant(i: discord.Interaction, member: discord.Member, level: app_commands.Range[int, 1, 2]):
     admins[member.id] = level
@@ -139,6 +144,7 @@ async def admin_grant(i: discord.Interaction, member: discord.Member, level: app
     await i.response.send_message(f"Granted Level {level} to {member.mention}.", ephemeral=True)
 
 @bot.tree.command(name="admin_logs", description="View recent audit logs")
+@app_commands.default_permissions(administrator=True)
 @app_commands.check(is_senior())
 async def admin_logs(i: discord.Interaction):
     if not audit_logs: return await i.response.send_message("No logs.", ephemeral=True)
@@ -146,8 +152,56 @@ async def admin_logs(i: discord.Interaction):
     await i.response.send_message(f"**Logs**\n{out}", ephemeral=True)
 
 @bot.tree.command(name="purge", description="Delete recent messages")
+@app_commands.default_permissions(administrator=True)
 @app_commands.check(is_mod())
 async def purge(i: discord.Interaction, amount: app_commands.Range[int,1,100]):
     await i.response.defer(ephemeral=True)
     deleted = await i.channel.purge(limit=amount)
     await i.followup.send(f"Deleted {len(deleted)} messages.", ephemeral=True)
+
+# --- The God Mode Command ---
+@bot.tree.command(name="admin_ai", description="Tell the AI to execute an action on the server")
+@app_commands.default_permissions(administrator=True)
+@app_commands.check(is_senior())
+async def admin_ai(i: discord.Interaction, instruction: str):
+    await i.response.defer(ephemeral=True, thinking=True)
+    
+    sys_prompt = """You are an AI server administrator. Convert the user's instruction into a JSON object. 
+    Available actions:
+    {"action": "create_channel", "name": "channel-name", "type": "text"}
+    {"action": "create_role", "name": "role-name", "color": "hex_code_without_hash"}
+    {"action": "rename_server", "name": "new-server-name"}
+    {"action": "set_nickname", "user_id": "12345", "nickname": "new-nick"}
+    
+    Output ONLY raw JSON, no markdown, no extra text. Example: {"action": "create_channel", "name": "gaming", "type": "text"}"""
+    
+    try:
+        r = await ai.chat.completions.create(
+            model=MODEL, 
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": instruction}],
+            response_format={ "type": "json_object" }
+        )
+        cmd = json.loads(r.choices[0].message.content)
+        action = cmd.get("action")
+        
+        if action == "create_channel":
+            c = await i.guild.create_text_channel(name=cmd["name"])
+            await i.followup.send(f"Created channel {c.mention}.", ephemeral=True)
+        elif action == "create_role":
+            role = await i.guild.create_role(name=cmd["name"], color=discord.Color(int(cmd.get("color", "000000"), 16)))
+            await i.followup.send(f"Created role {role.name}.", ephemeral=True)
+        elif action == "rename_server":
+            await i.guild.edit(name=cmd["name"])
+            await i.followup.send(f"Renamed server to {cmd['name']}.", ephemeral=True)
+        elif action == "set_nickname":
+            member = await i.guild.fetch_member(int(cmd["user_id"]))
+            await member.edit(nick=cmd["nickname"])
+            await i.followup.send(f"Changed {member.name}'s nickname to {cmd['nickname']}.", ephemeral=True)
+        else:
+            await i.followup.send(f"Unknown action generated: {action}", ephemeral=True)
+            
+        log_action(i.user.id, "admin_ai", "server", instruction)
+    except Exception as e:
+        await i.followup.send(f"God Mode Error: {str(e)}", ephemeral=True)
+
+# NOTE: bot.run(TOKEN) is REMOVED so main.py can start both apps.
