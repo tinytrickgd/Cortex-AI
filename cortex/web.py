@@ -17,6 +17,7 @@ DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+TOKEN_LIMIT = 100000
 
 app = FastAPI(title="Cortex AI v1.7")
 app.add_middleware(SessionMiddleware, secret_key=APP_SECRET or "fallback-secret", https_only=False, same_site="lax")
@@ -86,7 +87,6 @@ async def health(): return {"ok": True, "version": "1.7"}
 
 @app.get("/login")
 async def login(request: Request):
-    # Removed the strict state check because Render proxies drop the cookie
     params = {"client_id": DISCORD_CLIENT_ID, "redirect_uri": DISCORD_REDIRECT_URI, "response_type": "code", "scope": "identify guilds"}
     return RedirectResponse("https://discord.com/oauth2/authorize?" + urlencode(params))
 
@@ -127,9 +127,15 @@ class ChatInput(BaseModel):
 @app.post("/api/chat")
 async def chat(payload: ChatInput, request: Request):
     user = current_user(request)
+    
+    # 1. Check Tokens
+    used = await db.get_token_usage(user["id"])
+    if used >= TOKEN_LIMIT:
+        raise HTTPException(429, f"You have reached your daily limit of {TOKEN_LIMIT:,} tokens.")
+
     now = time.time()
     recent = [t for t in rate.get(user["id"], []) if now - t < 60]
-    if len(recent) >= 10: raise HTTPException(429, "Rate limit.")
+    if len(recent) >= 10: raise HTTPException(429, "Rate limit: slow down.")
     recent.append(now); rate[user["id"]] = recent
 
     sys_prompt = MODES.get(payload.mode, MODES["default"])
@@ -142,6 +148,11 @@ async def chat(payload: ChatInput, request: Request):
     try:
         resp = await ai.chat.completions.create(model=OPENAI_MODEL, messages=messages)
         answer = resp.choices[0].message.content or "(No text)"
+        
+        # 2. Log Tokens
+        tokens_used = resp.usage.total_tokens if hasattr(resp, 'usage') and resp.usage else 0
+        await db.add_token_usage(user["id"], tokens_used)
+        
         await db.add_history(user["id"], "assistant", answer)
         return {"answer": answer}
     except Exception as e:
