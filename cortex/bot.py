@@ -12,6 +12,8 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OWNER_ID = int(os.getenv("BOT_OWNER_ID", "1561009085405466714"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+TOKEN_LIMIT = 100000
+
 ai = AsyncOpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -58,7 +60,9 @@ def is_owner(): return lambda i: level_check(i, 3)
 def is_senior(): return lambda i: level_check(i, 2)
 def is_mod(): return lambda i: level_check(i, 1)
 
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
+intents = discord.Intents.default()
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
@@ -73,7 +77,6 @@ async def errors(i, error):
     if i.response.is_done(): await i.followup.send(msg, ephemeral=True)
     else: await i.response.send_message(msg, ephemeral=True)
 
-# --- Public AI Commands ---
 @bot.tree.command(name="cortex_help", description="Show Cortex AI commands")
 async def cortex_help(i: discord.Interaction):
     embed = discord.Embed(title="Cortex AI v1.7", color=discord.Color.purple())
@@ -85,8 +88,14 @@ async def cortex_help(i: discord.Interaction):
 
 @bot.tree.command(name="ask", description="Ask Cortex a question")
 async def ask(i: discord.Interaction, question: str):
-    await i.response.defer(ephemeral=True, thinking=True)
+    await i.response.defer(thinking=True)
     try:
+        # 1. Check Tokens
+        used = await db.get_token_usage(str(i.user.id))
+        if used >= TOKEN_LIMIT:
+            return await i.followup.send(f"You have reached your daily limit of {TOKEN_LIMIT:,} tokens. Try again tomorrow.", ephemeral=True)
+
+        # 2. Generate Answer
         mode, custom = await db.get_user_settings(str(i.user.id))
         sys_prompt = MODES.get(mode, "You are Cortex, a helpful AI assistant.")
         if custom: sys_prompt += f"\nUser instructions: {custom}"
@@ -101,8 +110,29 @@ async def ask(i: discord.Interaction, question: str):
         answer = r.choices[0].message.content or "No response."
         await db.add_history(str(i.user.id), "assistant", answer)
         
-        for start in range(0, len(answer), 1900):
-            await i.followup.send(answer[start:start+1900], ephemeral=True)
+        # 3. Log Tokens
+        tokens_used = r.usage.total_tokens if hasattr(r, 'usage') and r.usage else 0
+        await db.add_token_usage(str(i.user.id), tokens_used)
+        
+        # 4. Public Response (Truncated)
+        public_msg = answer
+        if len(public_msg) > 400:
+            public_msg = public_msg[:400] + "... *(full details sent to owner)*"
+            
+        await i.followup.send(f"**{i.user.display_name} asked:** {question}\n\n{public_msg}")
+        
+        # 5. DM the Owner
+        try:
+            owner = await bot.fetch_user(OWNER_ID)
+            embed = discord.Embed(title="Cortex Activity Log", color=discord.Color.purple())
+            embed.add_field(name="User", value=f"{i.user.mention} (`{i.user.id}`)", inline=False)
+            embed.add_field(name="Prompt", value=question[:1024], inline=False)
+            embed.add_field(name="Full Response", value=answer[:1024] + ("..." if len(answer)>1024 else ""), inline=False)
+            embed.set_footer(text=f"Tokens used: {tokens_used} | Total today: {used + tokens_used}/{TOKEN_LIMIT}")
+            await owner.send(embed=embed)
+        except Exception as e:
+            log.error(f"Failed to DM owner: {e}")
+
     except Exception as e:
         await i.followup.send(f"AI Error: {str(e)}", ephemeral=True)
 
@@ -136,7 +166,7 @@ async def cortex_stats(i: discord.Interaction):
     u, m = await db.get_stats()
     await i.response.send_message(f"**Cortex Stats**\nUsers: {u}\nMessages: {m}\nGuilds: {len(bot.guilds)}", ephemeral=True)
 
-# --- Admin Commands (Hidden from non-admins) ---
+# --- Admin Commands ---
 @bot.tree.command(name="admin_grant", description="Owner: grant admin level (1=Mod, 2=Senior)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.check(is_owner())
@@ -162,7 +192,6 @@ async def purge(i: discord.Interaction, amount: app_commands.Range[int,1,100]):
     deleted = await i.channel.purge(limit=amount)
     await i.followup.send(f"Deleted {len(deleted)} messages.", ephemeral=True)
 
-# --- The God Mode Command ---
 @bot.tree.command(name="admin_ai", description="Tell the AI to execute an action on the server")
 @app_commands.default_permissions(administrator=True)
 @app_commands.check(is_senior())
@@ -206,5 +235,3 @@ async def admin_ai(i: discord.Interaction, instruction: str):
         log_action(i.user.id, "admin_ai", "server", instruction)
     except Exception as e:
         await i.followup.send(f"God Mode Error: {str(e)}", ephemeral=True)
-
-# NOTE: bot.run(TOKEN) is REMOVED so main.py can start both apps.
