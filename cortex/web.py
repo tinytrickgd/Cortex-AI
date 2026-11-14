@@ -20,7 +20,10 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
 app = FastAPI(title="Cortex AI v1.7")
 app.add_middleware(SessionMiddleware, secret_key=APP_SECRET or "fallback-secret", https_only=False, same_site="lax")
-ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+ai = AsyncOpenAI(
+    api_key=OPENAI_API_KEY, 
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+)
 rate = {}
 
 MODES = {
